@@ -13,6 +13,7 @@ pydantic = "^2.8.2"
 mongoengine = "^0.29.0"
 python-multipart = "^0.0.9"
 pillow = "^10.4.0"
+super-image = "^0.1.7"
 
 
 [build-system]
