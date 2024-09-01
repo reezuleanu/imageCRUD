@@ -4,8 +4,10 @@ from mongoengine import ValidationError
 from PIL import Image as Img
 import os
 import json
+
 from database import Image
-from utils import is_image
+from models import ModifyForm
+from utils import is_image, apply_modifications
 
 router = APIRouter(prefix="/images")
 
@@ -128,7 +130,6 @@ def post_image(image: UploadFile) -> dict:
 
     return {
         "size": size,
-        "name": image.filename,
         "format": extension,
         "width": loaded_image.width,
         "height": loaded_image.height,
@@ -164,21 +165,6 @@ def delete_image(image_id: str) -> dict:
         raise HTTPException(400, "Invalid Image ID")
 
     return {"detail": "Image deleted successfully"}
-
-
-@router.put("/{image_id}")
-def modify_image(image_id: str, modifications: dict = Body()) -> dict:
-    """Modify an image on the server
-
-    Args:
-        image_id (str): id of the image
-        modifications (dict): modifications represented as JSON
-
-    Returns:
-        dict: JSON response
-    """
-
-    raise HTTPException(501)
 
 
 @router.put("/replace/{image_id}")
@@ -236,9 +222,55 @@ def replace_image(image_id: str, new_image: UploadFile) -> dict:
 
     return {
         "size": size,
-        "name": image.filename,
         "format": extension,
         "width": loaded_image.width,
         "height": loaded_image.height,
         "path": dbimage.path,
     }
+
+
+# ! Some tomfoolery is going on here
+@router.put("/{image_id}")
+def modify_image(image_id: str, modifications: ModifyForm = Body()) -> dict:
+    """Modify an image on the server
+
+    Args:
+        image_id (str): id of the image
+        modifications (dict): modifications represented as JSON
+
+    Returns:
+        dict: JSON response
+    """
+
+    # convert to dict for iteration
+    modifications = modifications.model_dump()
+
+    # open image and process the modifications
+    dbimage = Image.objects(id=image_id).first()
+    image_path = dbimage.path
+    modified_image = apply_modifications(image_path, modifications)
+
+    if modified_image is None:
+        raise HTTPException(500, "Could not apply changes to image")
+
+    modified_image.save(image_path)
+
+    # update database details
+    dbimage.update(
+        set__size=os.path.getsize(image_path) * 0.000001,
+        # set__format=modified_image.format.lower(),    # TODO figure out why this is NoneType
+        set__width=modified_image.width,
+        set__height=modified_image.height,
+    )
+    dbimage.save()
+    modified_image.close()
+
+    # return {
+    #     "size": dbimage.size,
+    #     "format": dbimage.format,
+    #     "width": modified_image.width,
+    #     "height": modified_image.height,
+    #     "path": image_path,
+    # }
+
+    return {"detail": "Image modified successfully!"}
