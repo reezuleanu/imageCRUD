@@ -12,7 +12,7 @@ def is_image(extension: str) -> None:
         image (UploadFile): image uploaded to fastapi
     """
 
-    accepted_formats = ("png", "jpg", "jpeg")
+    accepted_formats = ("png", "jpg", "jpeg", "webp")
 
     if extension not in accepted_formats:
         raise HTTPException(400, "This file format is not accepted")
