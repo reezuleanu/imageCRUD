@@ -85,6 +85,14 @@ def get_image(image_id: str) -> Response:
 
 @router.post("/")
 def post_image(image: UploadFile) -> dict:
+    """Post image to database and server sotrage
+
+    Args:
+        image (UploadFile): image uploaded
+
+    Returns:
+        dict: JSON response
+    """
 
     name = image.filename.lower()
     extension = name.split(".")[-1]
@@ -106,13 +114,6 @@ def post_image(image: UploadFile) -> dict:
     is_image(extension)
 
     size = image.size * 0.000001  # size in MB
-
-    # image_data = {
-    #     "size": size,
-    #     "format": extension,
-    #     "width": loaded_image.width,
-    #     "height": loaded_image.height,
-    # }
 
     # validate image data
     try:
@@ -164,7 +165,7 @@ def delete_image(image_id: str) -> dict:
     """Delete an image to the server
 
     Args:
-        image_id (int): image id
+        image_id (str): image id
 
     Returns:
         dict: JSON response
@@ -190,6 +191,7 @@ def delete_image(image_id: str) -> dict:
             "logging.database",
             "ERROR: Could not delete image from database, reason: " + str(e),
         )
+        raise HTTPException(500, "Could not delete image from database")
 
     return {"detail": "Image deleted successfully"}
 
@@ -227,24 +229,57 @@ def replace_image(image_id: str, new_image: UploadFile) -> dict:
 
     size = image.size * 0.000001  # size in MB
 
-    dbimage = Image.objects(id=image_id).first()
-    if dbimage is None:
-        raise HTTPException(404, "Image not found")
+    # get previous image data from the database and validate it
+    try:
+        dbimage = Image.objects(id=image_id).first()
+        if dbimage is None:
+            raise HTTPException(404, "Image not found")
+
+        ImageData.model_validate_json(dbimage.to_json())
+
+    except ValidationError:
+        raise HTTPException(400, "Invalid image id")
+    except ValueError:
+        rabbit_logging(
+            "logging.database",
+            f"CRITICAL: Invalid image data detected in database at {image_id}",
+        )
+        raise HTTPException(
+            500,
+            "Image previously had invalid data saved, therefore the operation was halted for investigation",
+        )
 
     # update image data
     try:
+
+        # validate new info
+        data = ImageData(
+            id=image_id,
+            size=size,
+            format=extension,
+            width=loaded_image.width,
+            height=loaded_image.height,
+            path=f"storage/{image_id}.{extension}",
+        )
+
+        # replace image info in database
+        dbimage.update(
+            set__size=data.size,
+            set__format=data.format,
+            set__width=data.width,
+            set__height=data.height,
+            set__path=data.path,
+        )
+
+        dbimage.save()
+
         # replace image in storage
         loaded_image.save(dbimage.path)
         loaded_image.close()
 
-        # replace image info in database
-        dbimage.update(
-            set__size=size,
-            set__format=extension,
-            set__width=loaded_image.width,
-            set__height=loaded_image.height,
-        )
-        dbimage.save()
+    except ValueError:
+        rabbit_logging("logging.database", "ERROR: Image has invalid metadata")
+        raise HTTPException(400, "Image has invalid metadata")
 
     except Exception as e:
         rabbit_logging(
@@ -252,13 +287,7 @@ def replace_image(image_id: str, new_image: UploadFile) -> dict:
         )
         raise HTTPException(500, "Could not update image data, reason: " + str(e))
 
-    return {
-        "size": size,
-        "format": extension,
-        "width": loaded_image.width,
-        "height": loaded_image.height,
-        "path": dbimage.path,
-    }
+    return data.model_dump()
 
 
 # ! Some tomfoolery is going on here
@@ -294,6 +323,7 @@ def modify_image(image_id: str, modifications: ModifyForm = Body()) -> dict:
 
     # ! workers will do the changes, then write the image to disk, and return nothing
     message = apply_modifications.send(image_path, modifications)
+    del message  # just so flake8 stops screaming at me
     # try:
     #     result = message.get_result(block=True)
     # except Exception as e:

@@ -1,3 +1,5 @@
+"""RabbitMQ message produces, used by database and worker components"""
+
 import pika
 
 connection = pika.BlockingConnection(pika.ConnectionParameters("localhost"))
