@@ -327,7 +327,7 @@ def modify_image(image_id: str, modifications: ModifyForm = Body()) -> dict:
     # try:
     #     result = message.get_result(block=True)
     # except Exception as e:
-    #     return {"abunda la caca": str(e)}
+    #     raise HTTPException(500, str(e))
 
     # reopen the image and update data in the database
     try:
