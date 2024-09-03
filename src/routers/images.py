@@ -30,7 +30,7 @@ def get_all_images() -> list[str]:
         )
         raise HTTPException(500, "Database error")
 
-    rabbit_logging("logging.database", "INFO: Read image ids from database")
+    # rabbit_logging("logging.database", "INFO: Read image ids from database")
     return ids
 
 
@@ -274,7 +274,7 @@ def replace_image(image_id: str, new_image: UploadFile) -> dict:
         dbimage.save()
 
         # replace image in storage
-        loaded_image.save(dbimage.path)
+        loaded_image.save(data.path)
         loaded_image.close()
 
     except ValueError:
@@ -342,7 +342,7 @@ def modify_image(image_id: str, modifications: ModifyForm = Body()) -> dict:
         )
         dbimage.save()
         modified_image.close()
-        rabbit_logging("logging.database", "INFO: Image data updated successfully")
+        # rabbit_logging("logging.database", "INFO: Image data updated successfully")
 
     except Exception as e:
         rabbit_logging(
