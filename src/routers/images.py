@@ -6,8 +6,9 @@ import os
 import json
 
 from database import Image
-from models import ModifyForm
+from models import ModifyForm, ImageData
 from utils import is_image, apply_modifications
+from producer import rabbit_logging
 
 router = APIRouter(prefix="/images")
 
@@ -34,8 +35,12 @@ def get_all_images() -> list[str]:
         for image in Image.objects:
             ids.append(str(image.id))
     except ServerSelectionTimeoutError:
+        rabbit_logging(
+            "logging.database", "ERROR: Could not read image ids from database"
+        )
         raise HTTPException(500, "Database error")
 
+    rabbit_logging("logging.database", "INFO: Read image ids from database")
     return ids
 
 
@@ -51,16 +56,26 @@ def get_image(image_id: str) -> Response:
     """
     try:
         image = Image.objects(id=image_id).first()
+        if image is None:
+            raise HTTPException(404, "Image not found")
     except ValidationError:
         raise HTTPException(400, "Invalid image id")
-    if image is None:
-        raise HTTPException(404, "Image not found")
 
-    # process image data
-    data = json.loads(image.to_json())
-    data["id"] = str(data["_id"]["$oid"])
-    del data["_id"]
-    data["size"] = f'{data["size"]} MB'
+    try:
+        # validate and process image data
+        data = json.loads(image.to_json())
+        data["id"] = str(data["_id"]["$oid"])
+        del data["_id"]
+        # data["size"] = f'{data["size"]} MB'
+        data = ImageData.model_validate(data)
+    except ValueError:
+        rabbit_logging("logging.database", "ERROR: Image has invalid metadata")
+        raise HTTPException(400, "Image has invalid metadata")
+    except Exception as e:
+        rabbit_logging(
+            "logging.database", "ERROR: Image could not be fetched, reason: " + str(e)
+        )
+        raise HTTPException(500, "Image could not be fetched, reason: " + str(e))
 
     # return HTML with data and the image
     return Response(
@@ -102,39 +117,56 @@ def post_image(image: UploadFile) -> dict:
 
     size = image.size * 0.000001  # size in MB
 
-    image_data = {
-        "size": size,
-        "format": extension,
-        "width": loaded_image.width,
-        "height": loaded_image.height,
-    }
+    # image_data = {
+    #     "size": size,
+    #     "format": extension,
+    #     "width": loaded_image.width,
+    #     "height": loaded_image.height,
+    # }
 
-    # save image info in database (without path)
+    # validate image data
     try:
-        dbimage = Image(**image_data)
+        data = ImageData(
+            size=size,
+            format=extension,
+            width=loaded_image.width,
+            height=loaded_image.height,
+        )
+    except ValueError:
+        rabbit_logging("logging.database", "ERROR: Image has invalid metadata")
+        raise HTTPException(400, "Image has invalid metadata")
+    except Exception as e:
+        rabbit_logging(
+            "logging.database", "ERROR: Image could not be uploaded, reason: " + str(e)
+        )
+        raise HTTPException(500, "Image could not be uploaded, reason: " + str(e))
+
+    # save image in storage and in database
+    try:
+        dbimage = Image(**data.model_dump())
         dbimage.save()
         id = dbimage.id
-    except Exception as e:
-        raise HTTPException(500, str(e))
 
-    # save file in storage and update path in DB
-    try:
+        # save file in storage and update path in DB
         loaded_image.save(f"storage/{id}.{extension}")
         loaded_image.close()
-    except IOError:
-        image.delete()
+        dbimage.path = f"storage/{id}.{extension}"
+        data = ImageData.model_validate_json(dbimage.to_json())
+        dbimage.save()
+
+        # set id for pydantic object
+        data.id = str(id)
+
+    except Exception as e:
+        os.remove(f"storage/{dbimage.id}.{extension}")
+        dbimage.delete()
+        rabbit_logging(
+            "logging.database",
+            "ERROR: Could not post image to database, reason: " + str(e),
+        )
         raise HTTPException(500, "File could not be saved")
 
-    dbimage.path = f"storage/{id}.{extension}"
-    dbimage.save()
-
-    return {
-        "size": size,
-        "format": extension,
-        "width": loaded_image.width,
-        "height": loaded_image.height,
-        "path": dbimage.path,
-    }
+    return data.model_dump()
 
 
 @router.delete("/{image_id}")
@@ -163,6 +195,11 @@ def delete_image(image_id: str) -> dict:
 
     except ValidationError:
         raise HTTPException(400, "Invalid Image ID")
+    except Exception as e:
+        rabbit_logging(
+            "logging.database",
+            "ERROR: Could not delete image from database, reason: " + str(e),
+        )
 
     return {"detail": "Image deleted successfully"}
 
@@ -204,21 +241,26 @@ def replace_image(image_id: str, new_image: UploadFile) -> dict:
     if dbimage is None:
         raise HTTPException(404, "Image not found")
 
-    # replace image in storage
+    # update image data
     try:
+        # replace image in storage
         loaded_image.save(dbimage.path)
         loaded_image.close()
-    except IOError:
-        raise HTTPException(500, "File could not be replaced")
 
-    # replace image info in database
-    dbimage.update(
-        set__size=size,
-        set__format=extension,
-        set__width=loaded_image.width,
-        set__height=loaded_image.height,
-    )
-    dbimage.save()
+        # replace image info in database
+        dbimage.update(
+            set__size=size,
+            set__format=extension,
+            set__width=loaded_image.width,
+            set__height=loaded_image.height,
+        )
+        dbimage.save()
+
+    except Exception as e:
+        rabbit_logging(
+            "logging.database", "ERROR: Could not update image data, reason: " + str(e)
+        )
+        raise HTTPException(500, "Could not update image data, reason: " + str(e))
 
     return {
         "size": size,
@@ -245,32 +287,48 @@ def modify_image(image_id: str, modifications: ModifyForm = Body()) -> dict:
     # convert to dict for iteration
     modifications = modifications.model_dump()
 
-    # open image and process the modifications
-    dbimage = Image.objects(id=image_id).first()
-    image_path = dbimage.path
-    modified_image = apply_modifications(image_path, modifications)
+    # open image and process modifications using drastiq workers
+    try:
+        dbimage = Image.objects(id=image_id).first()
+        image_path = dbimage.path
+        if not os.path.isfile(image_path):
+            raise Exception
+    except ValidationError:
+        raise HTTPException(400, "Invalid image id")
+    except Exception as e:
+        rabbit_logging(
+            "logging.database",
+            "ERROR: Could not find image on server, reason: " + str(e),
+        )
+        raise HTTPException(404, "Could not find image")
 
-    if modified_image is None:
-        raise HTTPException(500, "Could not apply changes to image")
+    # ! workers will do the changes, then write the image to disk, and return nothing
+    message = apply_modifications.send(image_path, modifications)
+    # try:
+    #     result = message.get_result(block=True)
+    # except Exception as e:
+    #     return {"abunda la caca": str(e)}
 
-    modified_image.save(image_path)
+    # reopen the image and update data in the database
+    try:
+        modified_image = Img.open(image_path)
 
-    # update database details
-    dbimage.update(
-        set__size=os.path.getsize(image_path) * 0.000001,
-        # set__format=modified_image.format.lower(),    # TODO figure out why this is NoneType
-        set__width=modified_image.width,
-        set__height=modified_image.height,
-    )
-    dbimage.save()
-    modified_image.close()
+        # update database details
+        dbimage.update(
+            set__size=os.path.getsize(image_path) * 0.000001,
+            # set__format=modified_image.format.lower(),    # TODO figure out why this is NoneType
+            set__width=modified_image.width,
+            set__height=modified_image.height,
+        )
+        dbimage.save()
+        modified_image.close()
+        rabbit_logging("logging.database", "INFO: Image data updated successfully")
 
-    # return {
-    #     "size": dbimage.size,
-    #     "format": dbimage.format,
-    #     "width": modified_image.width,
-    #     "height": modified_image.height,
-    #     "path": image_path,
-    # }
+    except Exception as e:
+        rabbit_logging(
+            "logging.database",
+            "ERROR: Image data could not be updated, reason: " + str(e),
+        )
+        raise HTTPException(500, "Image data could not be updated")
 
     return {"detail": "Image modified successfully!"}
