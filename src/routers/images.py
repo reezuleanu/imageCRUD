@@ -13,16 +13,6 @@ from producer import rabbit_logging
 router = APIRouter(prefix="/images")
 
 
-@router.get("/hello")
-def hello() -> dict:
-    """Hello world test endpoint
-
-    Returns:
-        dict: JSON response
-    """
-    return {"detail": "Hi there"}
-
-
 @router.get("/")
 def get_all_images() -> list[str]:
     """Get a list of all the image IDs in the database
