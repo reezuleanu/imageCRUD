@@ -290,7 +290,6 @@ def replace_image(image_id: str, new_image: UploadFile) -> dict:
     return data.model_dump()
 
 
-# ! Some tomfoolery is going on here
 @router.put("/{image_id}")
 def modify_image(image_id: str, modifications: ModifyForm = Body()) -> dict:
     """Modify an image on the server
@@ -328,20 +327,32 @@ def modify_image(image_id: str, modifications: ModifyForm = Body()) -> dict:
     #     result = message.get_result(block=True)
     # except Exception as e:
     #     raise HTTPException(500, str(e))
+    # ! ------------------
 
     # reopen the image and update data in the database
     try:
         modified_image = Img.open(image_path)
 
+        # validate new image data
+        data = ImageData(
+            id=image_id,
+            size=os.path.getsize(image_path) * 0.000001,
+            format=modified_image.format.lower(),
+            width=modified_image.width,
+            height=modified_image.height,
+            path=f"storage/{image_id}.{modified_image.format.lower()}",
+        )
+        modified_image.close()
+
         # update database details
         dbimage.update(
-            set__size=os.path.getsize(image_path) * 0.000001,
-            # set__format=modified_image.format.lower(),    # TODO figure out why this is NoneType
-            set__width=modified_image.width,
-            set__height=modified_image.height,
+            set__size=data.size,
+            set__format=data.format,
+            set__width=data.width,
+            set__height=data.height,
+            set__path=data.path,
         )
         dbimage.save()
-        modified_image.close()
         # rabbit_logging("logging.database", "INFO: Image data updated successfully")
 
     except Exception as e:
@@ -351,4 +362,5 @@ def modify_image(image_id: str, modifications: ModifyForm = Body()) -> dict:
         )
         raise HTTPException(500, "Image data could not be updated")
 
-    return {"detail": "Image modified successfully!"}
+    # return {"detail": "Image modified successfully!"}
+    return data.model_dump()

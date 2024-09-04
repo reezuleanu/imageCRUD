@@ -48,7 +48,7 @@ def upscale(image: ImageFile, factor: int) -> ImageFile:
         preds = model(inputs)
         preds = preds.squeeze(0)
 
-        rabbit_logging("logging.workers", "INFO: Image was upscaled successfully")
+        # rabbit_logging("logging.workers", "INFO: Image was upscaled successfully")
 
         return to_pil_image(preds)
 
@@ -121,7 +121,7 @@ def apply_modifications(image_path: str, json: dict) -> None:
                 image = allowed_modification_options[key](json[key])
 
         image.save(image_path)
-        rabbit_logging("logging.workers", "INFO: Image modified successfully")
+        # rabbit_logging("logging.workers", "INFO: Image modified successfully")
 
     except Exception as e:
         rabbit_logging(
